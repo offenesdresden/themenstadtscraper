@@ -3,7 +3,6 @@ import requests
 import psycopg2
 
 import json
-from multiprocessing.dummy import Pool
 
 def write_to_db(postgres_cursor, record, lat, lon):
 	"""
@@ -12,29 +11,26 @@ def write_to_db(postgres_cursor, record, lat, lon):
 		lat: float
 		lon: float
 	"""
-	jsonstring = json.dumps(record, ensure_ascii=False)
-	postgres_cursor.execute("""INSERT INTO elemente (properties, location) VALUES (%s, ST_GeomFromText('POINT(%s %s)', 4326));""", (jsonstring, lat, lon))
+	jsonstring = json.dumps(record, ensure_ascii=False, sort_keys=True)
+
+	# Prüfen, ob element bereits in der Datenbank vorhanden ist.
+	postgres_cursor.execute("""SELECT 1 FROM elemente WHERE properties::text = %s""", (jsonstring,))
+	# Falls nicht, rein damit.
+	if postgres_cursor.fetchone() is None:
+		postgres_cursor.execute("""INSERT INTO elemente (properties, location) VALUES (%s, ST_GeomFromText('POINT(%s %s)', 4326));""", (jsonstring, lat, lon))
 
 
-def handle_json_response(response_data, postgres_conn_string):
-	""" verarbeitet die Antwort vom Themenstadtplan
-
+def handle_json_response(response_data, postgres_cursor):
+	""" 
 		response_data: dict
-		postgres_conn_string: string
-
+		postgres_cursor: psycopg2._psycopg.cursor
 	"""
 
 	lat = response_data["value"]["PointInWgs"]["Y"]
 	lon = response_data["value"]["PointInWgs"]["X"]
 
-	conn = psycopg2.connect(postgres_conn_string)
-	cur = conn.cursor()
-
 	for record in response_data["value"]["Records"]:
-		write_to_db(cur, record, lat, lon)
-
-	conn.commit()
-	cur.close()
+		write_to_db(postgres_cursor, record, lat, lon)
 
 
 def build_queries(xmin, xmax, ymin, ymax, basereq, granularity=10.):
@@ -60,13 +56,12 @@ def scrape(parallelity=4, postgres_conn_string="dbname=themenstadtplan"):
 	HEADERS = {"X-AjaxPro-Method": "GetMapTipEx", "Origin": "http://stadtplan2.dresden.de", "Accept-Encoding": "gzip,deflate,sdch", "Accept-Language": "de-DE", "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/35.0.1916.153 Safari/537.36", "Content-Type": "text/plain; charset=UTF-8", "Accept": "*/*", "Referer": "http://stadtplan2.dresden.de/(S(jcksai1ssxvzjbveqyv1aizy))/spdd.aspx", "Cookie": "cardo3SessionGuid=C3_4ef68a3a-59ca-4a0c-b3cc-722fdabb1c84", "Connection": "keep-alive"}
 	BASEREQ = '{"applicationContextType":null,"themeList":"$BaseMap#5#Tiles","gx":%.6f,"gy":%.6f,"srs":31469,"currentMapScale":1500}'
 
-	for query in build_queries(XMIN, XMAX, YMIN, YMAX, basereq=BASEREQ, granularity=10.):
-		pass
-
-	#with Pool(parallelity) as pool:
-
-	#res = requests.post(BASEURL, data=jsonreq, headers=HEADERS)
-	#handle_json_response(res.json(), postgres_conn_string)
+	with psycopg2.connect(postgres_conn_string) as pg_conn:
+		pg_conn.autocommit = True
+		with pg_conn.cursor() as pg_cursor:
+			for query in build_queries(XMIN, XMAX, YMIN, YMAX, basereq=BASEREQ, granularity=10.):
+				res = requests.post(BASEURL, data=jsonreq, headers=HEADERS)
+				handle_json_response(res.json(), pg_cursor)
 
 
 if __name__ == "__main__":
